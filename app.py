@@ -1,27 +1,3 @@
-"""Discord economy bot for a Joseon-style ranking system.
-
-Features
-- Ranks: 왕, 영의정, 양반, 중인, 상민, 천민
-- /일하기: daily income for everyone except 왕 and 천민
-- Tax system: king sets tax rate with /세금설정
-- Treasury: taxes go to the guild treasury
-- Daily living cost: deducted automatically once per KST day
-- Rank trading: /신분사기 and /신분팔기
-- Exam fee + promotion chance: /과거시험
-- King money management: /돈관리
-- Optional Discord role sync if roles with the same names exist
-
-Install
-    pip install -U discord.py
-
-Environment
-    DISCORD_TOKEN=your_token_here
-    TEST_GUILD_ID=optional_guild_id_for_fast_command_sync
-
-Python
-    3.10+ recommended
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -61,45 +37,6 @@ WORK_PAY: dict[str, int] = {
     "영의정": 0,
     "천민": 0,
     "왕": 0,
-}
-
-LIVING_COST: dict[str, int] = {
-    "천민": 1_000,
-    "상민": 2_000,
-    "중인": 4_000,
-    "양반": 7_000,
-    "영의정": 12_000,
-    "왕": 0,
-}
-
-BUY_PRICE: dict[str, int] = {
-    "상민": 50_000,
-    "중인": 200_000,
-    "양반": 800_000,
-    "영의정": 0,
-}
-
-SELL_PRICE: dict[str, int] = {
-    "상민": 25_000,
-    "중인": 100_000,
-    "양반": 400_000,
-    "영의정": 0,
-}
-
-EXAM_FEE: dict[str, int] = {
-    "천민": 10_000,
-    "상민": 20_000,
-    "중인": 40_000,
-    "양반": 80_000,
-    "영의정": 0,
-    "왕": 0,
-}
-
-EXAM_SUCCESS_RATE: dict[str, float] = {
-    "천민": 0.45,
-    "상민": 0.40,
-    "중인": 0.35,
-    "양반": 0.25,
 }
 
 DEFAULT_TAX_RATE = 10
@@ -524,25 +461,6 @@ async def treasury_view(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(
         f"국고: **{treasury:,}원**\n세율: **{tax_rate}%**",
         ephemeral=True,
-    )
-
-
-@bot.tree.command(name="국고지출", description="왕이 국고에서 돈을 지출합니다.")
-@app_commands.describe(amount="지출할 금액", reason="지출 사유")
-async def treasury_spend(
-    interaction: discord.Interaction,
-    amount: app_commands.Range[int, 1, 10_000_000_000],
-    reason: str,
-) -> None:
-    guild, _, _ = await king_only(interaction)
-    if not store.remove_treasury(guild.id, int(amount)):
-        await interaction.response.send_message("국고 잔액이 부족합니다.", ephemeral=True)
-        return
-
-    await store.save()
-    await interaction.response.send_message(
-        f"국고에서 **{amount:,}원** 지출되었습니다.\n사유: {reason}",
-        ephemeral=False,
     )
 
 
