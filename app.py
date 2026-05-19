@@ -27,6 +27,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+
+from dotenv import load_dotenv
+load_dotenv()
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
