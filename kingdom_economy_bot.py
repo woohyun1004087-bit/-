@@ -44,8 +44,8 @@ from discord.ext import commands, tasks
 
 KST = ZoneInfo("Asia/Seoul")
 DATA_FILE = Path("data.json")
-TOKEN = os.getenv("DISCORD_TOKEN")
-TEST_GUILD_ID = os.getenv("TEST_GUILD_ID")
+TOKEN = os.getenv("MTUwNjIxNzkwMDg2NzA2Mzk2OQ.GXTySI.s_jm-PaxFlD1z-ZTE9bs19HLrQkkMc4lIAwdx0")
+TEST_GUILD_ID = os.getenv("1323217411507228712")
 
 RANKS = ["천민", "상민", "중인", "양반", "영의정", "왕"]
 PLAYABLE_RANKS = ["천민", "상민", "중인", "양반", "영의정"]
