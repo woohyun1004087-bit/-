@@ -1,27 +1,3 @@
-"""Discord economy bot for a Joseon-style ranking system.
-
-Features
-- Ranks: 왕, 영의정, 양반, 중인, 상민, 천민
-- /일하기: daily income for everyone except 왕 and 천민
-- Tax system: king sets tax rate with /세금설정
-- Treasury: taxes go to the guild treasury
-- Daily living cost: deducted automatically once per KST day
-- Rank trading: /신분사기 and /신분팔기
-- Exam fee + promotion chance: /과거시험
-- King money management: /돈관리, /국고지출
-- Optional Discord role sync if roles with the same names exist
-
-Install
-    pip install -U discord.py
-
-Environment
-    DISCORD_TOKEN=your_token_here
-    TEST_GUILD_ID=optional_guild_id_for_fast_command_sync
-
-Python
-    3.10+ recommended
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -566,28 +542,7 @@ async def money_manage(
         f"금액: **{amount:,}원**\n사유: {reason}",
         ephemeral=False,
     )
-
-@bot.tree.command(name="지급", description="왕이 국고에서 사용자에게 돈을 지급합니다.")
-@app_commands.describe(member="대상 사용자", amount="지급 금액")
-async def give(
-    interaction: discord.Interaction,
-    member: discord.Member,
-    amount: app_commands.Range[int, 1, 10_000_000_000],
-) -> None:
-    guild, _, _ = await king_only(interaction)
-    if not store.remove_treasury(guild.id, int(amount)):
-        await interaction.response.send_message("국고 잔액이 부족합니다.", ephemeral=True)
-        return
-
-    target = await ensure_registered(guild.id, member.id)
-    target.balance += int(amount)
-    store.set_member(guild.id, member.id, target)
-    await store.save()
-    await interaction.response.send_message(
-        f"국고에서 {member.mention}에게 **{amount:,}원** 지급했습니다.",
-        ephemeral=False,
-    )
-
+    
 # -----------------------------
 # Error handling
 # -----------------------------
