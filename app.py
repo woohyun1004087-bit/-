@@ -455,8 +455,6 @@ async def myinfo(
         f"신분: **{data.rank}**\n"
         f"잔액: **{data.balance:,}원**\n"
         f"오늘 일하기 가능 여부: **{work_status}**\n"
-        f"서버 세율: **{tax_rate}%**\n"
-        f"국고: **{treasury:,}원**"
     )
     await interaction.response.send_message(msg, ephemeral=True)
 
@@ -611,118 +609,6 @@ async def rank_set(
         f"{member.mention}의 신분이 **{rank.value}**로 변경되었습니다.",
         ephemeral=False,
     )
-
-
-@bot.tree.command(name="신분사기", description="현재 신분보다 한 단계 높은 신분을 삽니다.")
-async def rank_buy(interaction: discord.Interaction) -> None:
-    guild, member, data = await require_guild_and_member(interaction)
-    await apply_daily_living_cost(guild, member)
-    data = await ensure_registered(guild.id, member.id, member)
-
-    if data.rank in {"왕", "영의정"}:
-        await interaction.response.send_message("현재 신분은 살 수 없습니다.", ephemeral=True)
-        return
-
-    target = next_higher_rank(data.rank)
-    if target is None:
-        await interaction.response.send_message("더 이상 살 수 있는 신분이 없습니다.", ephemeral=True)
-        return
-
-    if target == "영의정":
-        await interaction.response.send_message(
-            "영의정은 구매할 수 없습니다. 왕의 임명 또는 과거시험으로만 올릴 수 있습니다.",
-            ephemeral=True,
-        )
-        return
-
-    price = buy_price_for(target)
-    if data.balance < price:
-        await interaction.response.send_message(
-            f"잔액이 부족합니다. 필요 금액: **{price:,}원**",
-            ephemeral=True,
-        )
-        return
-
-    data.balance -= price
-    data.rank = target
-    store.set_member(guild.id, member.id, data)
-    await store.save()
-    await sync_discord_rank_role(member, target)
-    await interaction.response.send_message(
-        f"{member.mention}의 신분이 **{target}**로 상승했습니다.\n지출: **{price:,}원**",
-        ephemeral=False,
-    )
-
-
-@bot.tree.command(name="신분팔기", description="현재 신분보다 한 단계 낮은 신분으로 내리고 돈을 받습니다.")
-async def rank_sell(interaction: discord.Interaction) -> None:
-    guild, member, data = await require_guild_and_member(interaction)
-    await apply_daily_living_cost(guild, member)
-    data = await ensure_registered(guild.id, member.id, member)
-
-    if data.rank in {"왕", "영의정"}:
-        await interaction.response.send_message("현재 신분은 팔 수 없습니다.", ephemeral=True)
-        return
-
-    target = next_lower_rank(data.rank)
-    if target is None:
-        await interaction.response.send_message("더 이상 팔 수 있는 신분이 없습니다.", ephemeral=True)
-        return
-
-    price = sell_price_for(data.rank)
-    data.balance += price
-    data.rank = target
-    store.set_member(guild.id, member.id, data)
-    await store.save()
-    await sync_discord_rank_role(member, target)
-    await interaction.response.send_message(
-        f"{member.mention}의 신분이 **{target}**로 내려갔습니다.\n수령액: **{price:,}원**",
-        ephemeral=False,
-    )
-
-
-@bot.tree.command(name="과거시험", description="응시료를 내고 신분 상승을 노립니다.")
-async def exam(interaction: discord.Interaction) -> None:
-    guild, member, data = await require_guild_and_member(interaction)
-    await apply_daily_living_cost(guild, member)
-    data = await ensure_registered(guild.id, member.id, member)
-
-    if data.rank in {"왕", "영의정"}:
-        await interaction.response.send_message(
-            "현재 신분은 과거시험 대상이 아닙니다.",
-            ephemeral=True,
-        )
-        return
-
-    fee = exam_fee_for(data.rank)
-    if data.balance < fee:
-        await interaction.response.send_message(
-            f"응시료가 부족합니다. 필요 금액: **{fee:,}원**",
-            ephemeral=True,
-        )
-        return
-
-    data.balance -= fee
-    rate = success_rate_for(data.rank)
-    success = random.random() < rate
-    promoted_to = next_higher_rank(data.rank)
-
-    if success and promoted_to is not None:
-        data.rank = promoted_to
-        promotion_text = f"합격! 신분이 **{promoted_to}**로 상승했습니다."
-        await sync_discord_rank_role(member, promoted_to)
-    else:
-        promotion_text = "아쉽게도 불합격했습니다. 신분은 그대로입니다."
-
-    store.set_member(guild.id, member.id, data)
-    await store.save()
-
-    await interaction.response.send_message(
-        f"{member.mention}이(가) 과거시험에 응시했습니다.\n"
-        f"응시료: **{fee:,}원**\n합격 확률: **{int(rate * 100)}%**\n{promotion_text}",
-        ephemeral=False,
-    )
-
 
 # -----------------------------
 # Error handling
