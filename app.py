@@ -433,16 +433,6 @@ async def king_only(interaction: discord.Interaction) -> tuple[discord.Guild, di
 # -----------------------------
 
 
-@bot.tree.command(name="가입", description="경제 시스템에 등록합니다.")
-async def join(interaction: discord.Interaction) -> None:
-    guild, member, data = await require_guild_and_member(interaction)
-    await apply_daily_living_cost(guild, member)
-    await interaction.response.send_message(
-        f"등록 완료: {member.mention} | 신분: **{data.rank}** | 잔액: **{data.balance:,}원**",
-        ephemeral=True,
-    )
-
-
 @bot.tree.command(name="내정보", description="내 신분과 자산을 확인합니다.")
 @app_commands.describe(target="확인할 사용자")
 async def myinfo(interaction: discord.Interaction, target: discord.Member | None = None) -> None:
@@ -534,24 +524,6 @@ async def treasury_view(interaction: discord.Interaction) -> None:
     )
 
 
-@bot.tree.command(name="국고지출", description="왕이 국고에서 돈을 지출합니다.")
-@app_commands.describe(amount="지출할 금액", reason="지출 사유")
-async def treasury_spend(
-    interaction: discord.Interaction,
-    amount: app_commands.Range[int, 1, 10_000_000_000],
-    reason: str,
-) -> None:
-    guild, _, _ = await king_only(interaction)
-    if not store.remove_treasury(guild.id, int(amount)):
-        await interaction.response.send_message("국고 잔액이 부족합니다.", ephemeral=True)
-        return
-    await store.save()
-    await interaction.response.send_message(
-        f"국고에서 **{amount:,}원** 지출되었습니다.\n사유: {reason}",
-        ephemeral=False,
-    )
-
-
 @bot.tree.command(name="돈관리", description="왕이 특정 사용자의 돈을 직접 조정합니다.")
 @app_commands.describe(
     member="대상 사용자",
@@ -595,134 +567,6 @@ async def money_manage(
         ephemeral=False,
     )
 
-
-@bot.tree.command(name="신분설정", description="왕이 사용자의 신분을 직접 설정합니다.")
-@app_commands.describe(member="대상 사용자", rank="설정할 신분")
-@app_commands.choices(
-    rank=[app_commands.Choice(name=r, value=r) for r in RANKS]
-)
-async def rank_set(
-    interaction: discord.Interaction,
-    member: discord.Member,
-    rank: app_commands.Choice[str],
-) -> None:
-    guild, _, _ = await king_only(interaction)
-    target = await ensure_registered(guild.id, member.id)
-    target.rank = rank.value
-    store.set_member(guild.id, member.id, target)
-    await store.save()
-    await sync_discord_rank_role(member, rank.value)
-    await interaction.response.send_message(
-        f"{member.mention}의 신분이 **{rank.value}**로 변경되었습니다.",
-        ephemeral=False,
-    )
-
-
-@bot.tree.command(name="신분사기", description="현재 신분보다 한 단계 높은 신분을 삽니다.")
-async def rank_buy(interaction: discord.Interaction) -> None:
-    guild, member, data = await require_guild_and_member(interaction)
-    await apply_daily_living_cost(guild, member)
-    data = store.get_member(guild.id, member.id)
-
-    if data.rank in {"왕", "영의정"}:
-        await interaction.response.send_message("현재 신분은 살 수 없습니다.", ephemeral=True)
-        return
-
-    target = next_higher_rank(data.rank)
-    if target is None:
-        await interaction.response.send_message("더 이상 살 수 있는 신분이 없습니다.", ephemeral=True)
-        return
-
-    if target == "영의정":
-        await interaction.response.send_message("영의정은 구매할 수 없습니다. 왕의 임명 또는 과거시험으로만 올릴 수 있습니다.", ephemeral=True)
-        return
-
-    price = buy_price_for(target)
-    if data.balance < price:
-        await interaction.response.send_message(
-            f"잔액이 부족합니다. 필요 금액: **{price:,}원**",
-            ephemeral=True,
-        )
-        return
-
-    data.balance -= price
-    data.rank = target
-    store.set_member(guild.id, member.id, data)
-    await store.save()
-    await sync_discord_rank_role(member, target)
-    await interaction.response.send_message(
-        f"{member.mention}의 신분이 **{target}**로 상승했습니다.\n지출: **{price:,}원**",
-        ephemeral=False,
-    )
-
-
-@bot.tree.command(name="신분팔기", description="현재 신분보다 한 단계 낮은 신분으로 내리고 돈을 받습니다.")
-async def rank_sell(interaction: discord.Interaction) -> None:
-    guild, member, data = await require_guild_and_member(interaction)
-    await apply_daily_living_cost(guild, member)
-    data = store.get_member(guild.id, member.id)
-
-    if data.rank in {"왕", "영의정"}:
-        await interaction.response.send_message("현재 신분은 팔 수 없습니다.", ephemeral=True)
-        return
-
-    target = next_lower_rank(data.rank)
-    if target is None:
-        await interaction.response.send_message("더 이상 팔 수 있는 신분이 없습니다.", ephemeral=True)
-        return
-
-    price = sell_price_for(data.rank)
-    data.balance += price
-    data.rank = target
-    store.set_member(guild.id, member.id, data)
-    await store.save()
-    await sync_discord_rank_role(member, target)
-    await interaction.response.send_message(
-        f"{member.mention}의 신분이 **{target}**로 내려갔습니다.\n수령액: **{price:,}원**",
-        ephemeral=False,
-    )
-
-
-@bot.tree.command(name="과거시험", description="응시료를 내고 신분 상승을 노립니다.")
-async def exam(interaction: discord.Interaction) -> None:
-    guild, member, data = await require_guild_and_member(interaction)
-    await apply_daily_living_cost(guild, member)
-    data = store.get_member(guild.id, member.id)
-
-    if data.rank in {"왕", "영의정"}:
-        await interaction.response.send_message("현재 신분은 과거시험 대상이 아닙니다.", ephemeral=True)
-        return
-
-    fee = exam_fee_for(data.rank)
-    if data.balance < fee:
-        await interaction.response.send_message(
-            f"응시료가 부족합니다. 필요 금액: **{fee:,}원**",
-            ephemeral=True,
-        )
-        return
-
-    data.balance -= fee
-    rate = success_rate_for(data.rank)
-    success = random.random() < rate
-    promoted_to = next_higher_rank(data.rank)
-
-    if success and promoted_to is not None:
-        data.rank = promoted_to
-        promotion_text = f"합격! 신분이 **{promoted_to}**로 상승했습니다."
-        await sync_discord_rank_role(member, promoted_to)
-    else:
-        promotion_text = "아쉽게도 불합격했습니다. 신분은 그대로입니다."
-
-    store.set_member(guild.id, member.id, data)
-    await store.save()
-
-    await interaction.response.send_message(
-        f"{member.mention}이(가) 과거시험에 응시했습니다.\n"
-        f"응시료: **{fee:,}원**\n합격 확률: **{int(rate * 100)}%**\n{promotion_text}",
-        ephemeral=False,
-    )
-
-
 @bot.tree.command(name="지급", description="왕이 국고에서 사용자에게 돈을 지급합니다.")
 @app_commands.describe(member="대상 사용자", amount="지급 금액")
 async def give(
@@ -743,19 +587,6 @@ async def give(
         f"국고에서 {member.mention}에게 **{amount:,}원** 지급했습니다.",
         ephemeral=False,
     )
-
-
-@bot.tree.command(name="세팅초기화", description="왕이 서버 경제 데이터를 다시 초기화합니다.")
-async def reset_server(interaction: discord.Interaction) -> None:
-    guild, _, _ = await king_only(interaction)
-    store.data["guilds"][str(guild.id)] = {
-        "tax_rate": DEFAULT_TAX_RATE,
-        "treasury": 0,
-        "members": {},
-    }
-    await store.save()
-    await interaction.response.send_message("서버 경제 데이터가 초기화되었습니다.", ephemeral=True)
-
 
 # -----------------------------
 # Error handling
