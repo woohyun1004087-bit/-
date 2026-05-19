@@ -293,7 +293,7 @@ def sell_price_for(rank: str) -> int:
     return SELL_PRICE.get(rank, 0)
 
 
-async async def sync_discord_rank_role(member: discord.Member, new_rank: str) -> None:
+async def sync_discord_rank_role(member: discord.Member, new_rank: str) -> None:
     """Synchronize actual Discord roles if the server has same-named roles.
 
     This is optional: the bot will still work if the roles do not exist.
