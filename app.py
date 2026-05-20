@@ -392,6 +392,63 @@ async def treasury_view(interaction: discord.Interaction) -> None:
         ephemeral=True,
     )
 
+@bot.tree.command(name="돈주기", description="다른 사용자에게 돈을 송금합니다.")
+@app_commands.describe(
+    target="받을 사용자",
+    amount="송금할 금액",
+    reason="사유",
+)
+async def money_give(
+    interaction: discord.Interaction,
+    target: discord.Member,
+    amount: app_commands.Range[int, 1, 10_000_000_000],
+    reason: str = "",
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("서버에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("서버 멤버만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    sender = interaction.user
+
+    if target.bot:
+        await interaction.response.send_message("봇에게는 송금할 수 없습니다.", ephemeral=True)
+        return
+
+    if target.id == sender.id:
+        await interaction.response.send_message("자기 자신에게는 송금할 수 없습니다.", ephemeral=True)
+        return
+
+    sender_data = await ensure_registered(interaction.guild.id, sender.id, sender)
+    target_data = await ensure_registered(interaction.guild.id, target.id, target)
+
+    send_amount = int(amount)
+
+    if sender_data.balance < send_amount:
+        await interaction.response.send_message(
+            f"잔액이 부족합니다.\n"
+            f"현재 잔액: **{sender_data.balance:,}원**\n"
+            f"필요 금액: **{send_amount:,}원**",
+            ephemeral=True,
+        )
+        return
+
+    sender_data.balance -= send_amount
+    target_data.balance += send_amount
+
+    store.set_member(interaction.guild.id, sender.id, sender_data)
+    store.set_member(interaction.guild.id, target.id, target_data)
+    await store.save()
+
+    reason_text = f"\n사유: {reason}" if reason else ""
+
+    await interaction.response.send_message(
+        f"{sender.mention}이(가) {target.mention}에게 **{send_amount:,}원**을 송금했습니다.{reason_text}",
+        ephemeral=False,
+    )
 
 @bot.tree.command(name="돈관리", description="왕이 특정 대상에게 돈을 지급하거나 차감합니다.")
 @app_commands.describe(
