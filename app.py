@@ -43,6 +43,7 @@ DEFAULT_BALANCE = 0
 DEFAULT_RANK = "상민"
 
 ROLE_NAMES = {rank: rank for rank in RANKS}
+BLOCKED_EARN_ROLE = "유람객"
 
 
 # -----------------------------
@@ -202,6 +203,14 @@ def work_pay_for(rank: str) -> int:
     return WORK_PAY.get(rank, 0)
 
 
+def has_role_name(member: discord.Member, role_name: str) -> bool:
+    return any(role.name == role_name for role in member.roles)
+
+
+def can_receive_money(member: discord.Member) -> bool:
+    return not has_role_name(member, BLOCKED_EARN_ROLE)
+
+
 async def sync_discord_rank_role(member: discord.Member, new_rank: str) -> None:
     """Synchronize actual Discord roles if the server has same-named roles."""
     guild = member.guild
@@ -313,7 +322,9 @@ async def myinfo(
     data = await ensure_registered(interaction.guild.id, target.id, target)
 
     today = today_key()
-    if data.last_work_day == today:
+    if has_role_name(target, BLOCKED_EARN_ROLE):
+        work_status = "유람객 불가"
+    elif data.last_work_day == today:
         work_status = "오늘 완료"
     else:
         work_status = "가능" if can_work(data.rank) else "불가"
@@ -330,6 +341,10 @@ async def myinfo(
 @bot.tree.command(name="일하기", description="하루에 한 번 일해서 돈을 벌 수 있습니다.")
 async def work(interaction: discord.Interaction) -> None:
     guild, member, data = await require_guild_and_member(interaction)
+
+    if has_role_name(member, BLOCKED_EARN_ROLE):
+        await interaction.response.send_message("유람객은 /일하기를 할 수 없습니다.", ephemeral=True)
+        return
 
     today = today_key()
     if data.last_work_day == today:
@@ -366,32 +381,6 @@ async def work(interaction: discord.Interaction) -> None:
     )
 
 
-@bot.tree.command(name="세금설정", description="왕이 세율을 설정합니다.")
-@app_commands.describe(rate="0~100 사이의 세율(%)")
-async def tax_set(
-    interaction: discord.Interaction,
-    rate: app_commands.Range[int, 0, 100],
-) -> None:
-    guild, _, _ = await king_only(interaction)
-    store.set_tax_rate(guild.id, int(rate))
-    await store.save()
-    await interaction.response.send_message(f"세율이 **{rate}%**로 설정되었습니다.", ephemeral=False)
-
-
-@bot.tree.command(name="국고보기", description="국고를 확인합니다.")
-async def treasury_view(interaction: discord.Interaction) -> None:
-    guild, _, data = await require_guild_and_member(interaction)
-    if data.rank not in {"왕", "영의정"}:
-        await interaction.response.send_message("국고는 왕 또는 영의정만 확인할 수 있습니다.", ephemeral=True)
-        return
-
-    treasury = store.get_treasury(guild.id)
-    tax_rate = store.get_tax_rate(guild.id)
-    await interaction.response.send_message(
-        f"국고: **{treasury:,}원**\n세율: **{tax_rate}%**",
-        ephemeral=True,
-    )
-
 @bot.tree.command(name="돈주기", description="다른 사용자에게 돈을 송금합니다.")
 @app_commands.describe(
     target="받을 사용자",
@@ -422,6 +411,10 @@ async def money_give(
         await interaction.response.send_message("자기 자신에게는 송금할 수 없습니다.", ephemeral=True)
         return
 
+    if has_role_name(target, BLOCKED_EARN_ROLE):
+        await interaction.response.send_message("유람객은 돈을 받을 수 없습니다.", ephemeral=True)
+        return
+
     sender_data = await ensure_registered(interaction.guild.id, sender.id, sender)
     target_data = await ensure_registered(interaction.guild.id, target.id, target)
 
@@ -449,6 +442,34 @@ async def money_give(
         f"{sender.mention}이(가) {target.mention}에게 **{send_amount:,}원**을 송금했습니다.{reason_text}",
         ephemeral=False,
     )
+
+
+@bot.tree.command(name="세금설정", description="왕이 세율을 설정합니다.")
+@app_commands.describe(rate="0~100 사이의 세율(%)")
+async def tax_set(
+    interaction: discord.Interaction,
+    rate: app_commands.Range[int, 0, 100],
+) -> None:
+    guild, _, _ = await king_only(interaction)
+    store.set_tax_rate(guild.id, int(rate))
+    await store.save()
+    await interaction.response.send_message(f"세율이 **{rate}%**로 설정되었습니다.", ephemeral=False)
+
+
+@bot.tree.command(name="국고보기", description="국고를 확인합니다.")
+async def treasury_view(interaction: discord.Interaction) -> None:
+    guild, _, data = await require_guild_and_member(interaction)
+    if data.rank not in {"왕", "영의정"}:
+        await interaction.response.send_message("국고는 왕 또는 영의정만 확인할 수 있습니다.", ephemeral=True)
+        return
+
+    treasury = store.get_treasury(guild.id)
+    tax_rate = store.get_tax_rate(guild.id)
+    await interaction.response.send_message(
+        f"국고: **{treasury:,}원**\n세율: **{tax_rate}%**",
+        ephemeral=True,
+    )
+
 
 @bot.tree.command(name="돈관리", description="왕이 특정 대상에게 돈을 지급하거나 차감합니다.")
 @app_commands.describe(
@@ -513,9 +534,17 @@ async def money_manage(
 
     count = len(targets)
     per_person = int(amount)
-    total_amount = per_person * count
 
     if action.value == "give":
+        payable_targets = [t for t in targets if can_receive_money(t)]
+        blocked_count = count - len(payable_targets)
+
+        if not payable_targets:
+            await interaction.response.send_message("유람객만 있어서 지급할 수 없습니다.", ephemeral=True)
+            return
+
+        total_amount = per_person * len(payable_targets)
+
         if store.get_treasury(guild.id) < total_amount:
             await interaction.response.send_message(
                 f"국고 잔액이 부족합니다.\n필요 금액: **{total_amount:,}원**",
@@ -523,7 +552,7 @@ async def money_manage(
             )
             return
 
-        for target in targets:
+        for target in payable_targets:
             data = await ensure_registered(guild.id, target.id, target, save=False)
             data.balance += per_person
             store.set_member(guild.id, target.id, data)
@@ -534,14 +563,18 @@ async def money_manage(
         if target_type.value == "member":
             title = f"{targets[0].mention}에게"
         elif target_type.value == "role":
-            title = f"{role.mention} 역할의 **{count}명**에게"
+            title = f"{role.mention} 역할의 **{len(payable_targets)}명**에게"
         else:
-            title = f"서버의 **{count}명**에게"
+            title = f"서버의 **{len(payable_targets)}명**에게"
+
+        blocked_text = f"\n유람객 **{blocked_count}명**은 제외했습니다." if blocked_count else ""
 
         await interaction.response.send_message(
             f"{title} 1인당 **{per_person:,}원**씩 지급했습니다.\n"
             f"총 지급액: **{total_amount:,}원**\n"
-            f"사유: {reason}",
+            f"사유: {reason}\n"
+            f"남은 국고: **{store.get_treasury(guild.id):,}원**"
+            f"{blocked_text}",
             ephemeral=False,
         )
         return
@@ -567,7 +600,8 @@ async def money_manage(
     await interaction.response.send_message(
         f"{title} 차감했습니다.\n"
         f"실제 차감액: **{total_taken:,}원**\n"
-        f"사유: {reason}",
+        f"사유: {reason}\n"
+        f"남은 국고: **{store.get_treasury(guild.id):,}원**",
         ephemeral=False,
     )
 
