@@ -474,50 +474,130 @@ async def treasury_view(interaction: discord.Interaction) -> None:
     )
 
 
-@bot.tree.command(name="돈관리", description="왕이 특정 사용자의 돈을 직접 조정합니다.")
+# -----------------------------
+# 돈관리
+# -----------------------------
+
+@bot.tree.command(name="돈관리", description="왕이 특정 대상에게 돈을 지급하거나 차감합니다.")
 @app_commands.describe(
+    action="지급 또는 차감",
+    target_type="사람, 역할, 전체 중 하나",
+    amount="1인당 금액",
     member="대상 사용자",
-    amount="금액",
-    mode="지급이면 대상에게 주고, 차감이면 대상에서 빼서 국고로 보냅니다.",
+    role="대상 역할",
     reason="사유",
 )
 @app_commands.choices(
-    mode=[
+    action=[
         app_commands.Choice(name="지급", value="give"),
         app_commands.Choice(name="차감", value="take"),
-    ]
+    ],
+    target_type=[
+        app_commands.Choice(name="사람", value="member"),
+        app_commands.Choice(name="역할", value="role"),
+        app_commands.Choice(name="전체", value="all"),
+    ],
 )
 async def money_manage(
     interaction: discord.Interaction,
-    member: discord.Member,
+    action: app_commands.Choice[str],
+    target_type: app_commands.Choice[str],
     amount: app_commands.Range[int, 1, 10_000_000_000],
-    mode: app_commands.Choice[str],
-    reason: str,
+    member: discord.Member | None = None,
+    role: discord.Role | None = None,
+    reason: str = "",
 ) -> None:
     guild, _, _ = await king_only(interaction)
-    target = await ensure_registered(guild.id, member.id, member)
 
-    if mode.value == "give":
-        if not store.remove_treasury(guild.id, int(amount)):
-            await interaction.response.send_message("국고 잔액이 부족합니다.", ephemeral=True)
+    targets: list[discord.Member] = []
+
+    if target_type.value == "member":
+        if member is None:
+            await interaction.response.send_message("대상 사용자를 지정해야 합니다.", ephemeral=True)
             return
-        target.balance += int(amount)
-        actual_amount = int(amount)
-        action_text = "지급"
-    else:
-        actual_amount = min(target.balance, int(amount))
-        target.balance -= actual_amount
-        store.add_treasury(guild.id, actual_amount)
-        action_text = "차감"
+        if member.bot:
+            await interaction.response.send_message("봇은 대상이 될 수 없습니다.", ephemeral=True)
+            return
+        targets = [member]
 
-    store.set_member(guild.id, member.id, target)
+    elif target_type.value == "role":
+        if role is None:
+            await interaction.response.send_message("대상 역할을 지정해야 합니다.", ephemeral=True)
+            return
+        targets = [m for m in role.members if not m.bot]
+        if not targets:
+            await interaction.response.send_message("해당 역할에 대상이 없습니다.", ephemeral=True)
+            return
+
+    elif target_type.value == "all":
+        targets = [m for m in guild.members if not m.bot]
+        if not targets:
+            await interaction.response.send_message("대상 사용자가 없습니다.", ephemeral=True)
+            return
+
+    else:
+        await interaction.response.send_message("잘못된 대상 종류입니다.", ephemeral=True)
+        return
+
+    count = len(targets)
+    total_amount = int(amount) * count
+
+    if action.value == "give":
+        if store.get_treasury(guild.id) < total_amount:
+            await interaction.response.send_message(
+                f"국고 잔액이 부족합니다.\n필요 금액: **{total_amount:,}원**",
+                ephemeral=True,
+            )
+            return
+
+        for target in targets:
+            data = await ensure_registered(guild.id, target.id, target)
+            data.balance += int(amount)
+            store.set_member(guild.id, target.id, data)
+
+        store.remove_treasury(guild.id, total_amount)
+        await store.save()
+
+        if target_type.value == "member":
+            title = f"{targets[0].mention}에게"
+        elif target_type.value == "role":
+            title = f"{role.mention} 역할의 **{count}명**에게"
+        else:
+            title = f"서버의 **{count}명**에게"
+
+        await interaction.response.send_message(
+            f"{title} 1인당 **{int(amount):,}원**씩 지급했습니다.\n"
+            f"총 지급액: **{total_amount:,}원**\n"
+            f"사유: {reason}",
+            ephemeral=False,
+        )
+        return
+
+    # 차감
+    total_taken = 0
+    for target in targets:
+        data = await ensure_registered(guild.id, target.id, target)
+        taken = min(data.balance, int(amount))
+        data.balance -= taken
+        total_taken += taken
+        store.set_member(guild.id, target.id, data)
+
+    store.add_treasury(guild.id, total_taken)
     await store.save()
+
+    if target_type.value == "member":
+        title = f"{targets[0].mention}의 돈을"
+    elif target_type.value == "role":
+        title = f"{role.mention} 역할의 **{count}명**의 돈을"
+    else:
+        title = f"서버의 **{count}명**의 돈을"
+
     await interaction.response.send_message(
-        f"{member.mention}의 돈을 **{action_text}**했습니다.\n"
-        f"실제 금액: **{actual_amount:,}원**\n사유: {reason}",
+        f"{title} 차감했습니다.\n"
+        f"실제 차감액: **{total_taken:,}원**\n"
+        f"사유: {reason}",
         ephemeral=False,
     )
-
 
 @bot.tree.command(name="신분설정", description="왕이 사용자의 신분을 직접 설정합니다.")
 @app_commands.describe(member="대상 사용자", rank="설정할 신분")
