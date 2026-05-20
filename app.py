@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import random
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 
 load_dotenv()
 
@@ -29,16 +28,6 @@ TEST_GUILD_ID = os.getenv("TEST_GUILD_ID")
 
 RANKS = ["천민", "상민", "중인", "양반", "영의정", "왕"]
 PLAYABLE_RANKS = ["천민", "상민", "중인", "양반", "영의정"]
-
-
-LIVING_COST: dict[str, int] = {
-    "천민": 1_000,
-    "상민": 2_000,
-    "중인": 4_000,
-    "양반": 7_000,
-    "영의정": 12_000,
-    "왕": 0,
-}
 
 WORK_PAY: dict[str, int] = {
     "상민": 12_000,
@@ -60,7 +49,6 @@ ROLE_NAMES = {rank: rank for rank in RANKS}
 # Storage
 # -----------------------------
 
-
 def now_kst() -> datetime:
     return datetime.now(KST)
 
@@ -79,7 +67,6 @@ class MemberData:
     rank: str = DEFAULT_RANK
     balance: int = DEFAULT_BALANCE
     last_work_day: str = ""
-    last_living_day: str = ""
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "MemberData":
@@ -87,7 +74,6 @@ class MemberData:
             rank=raw.get("rank", DEFAULT_RANK),
             balance=int(raw.get("balance", DEFAULT_BALANCE)),
             last_work_day=raw.get("last_work_day", ""),
-            last_living_day=raw.get("last_living_day", ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -95,7 +81,6 @@ class MemberData:
             "rank": self.rank,
             "balance": self.balance,
             "last_work_day": self.last_work_day,
-            "last_living_day": self.last_living_day,
         }
 
 
@@ -176,7 +161,6 @@ store = EconomyStore(DATA_FILE)
 # Helpers
 # -----------------------------
 
-
 def is_king(member_data: MemberData) -> bool:
     return member_data.rank == "왕"
 
@@ -214,28 +198,8 @@ def can_work(rank: str) -> bool:
     return rank in {"상민", "중인", "양반", "영의정"}
 
 
-def living_cost_for(rank: str) -> int:
-    return LIVING_COST.get(rank, 0)
-
-
 def work_pay_for(rank: str) -> int:
     return WORK_PAY.get(rank, 0)
-
-
-def exam_fee_for(rank: str) -> int:
-    return EXAM_FEE.get(rank, 0)
-
-
-def success_rate_for(rank: str) -> float:
-    return EXAM_SUCCESS_RATE.get(rank, 0.0)
-
-
-def buy_price_for(rank: str) -> int:
-    return BUY_PRICE.get(rank, 0)
-
-
-def sell_price_for(rank: str) -> int:
-    return SELL_PRICE.get(rank, 0)
 
 
 async def sync_discord_rank_role(member: discord.Member, new_rank: str) -> None:
@@ -255,7 +219,13 @@ async def sync_discord_rank_role(member: discord.Member, new_rank: str) -> None:
         pass
 
 
-async def ensure_registered(guild_id: int, user_id: int, member: discord.Member | None = None) -> MemberData:
+async def ensure_registered(
+    guild_id: int,
+    user_id: int,
+    member: discord.Member | None = None,
+    *,
+    save: bool = True,
+) -> MemberData:
     data = store.get_member(guild_id, user_id)
 
     if member is not None and member.guild.id == guild_id and member.id == user_id:
@@ -268,82 +238,11 @@ async def ensure_registered(guild_id: int, user_id: int, member: discord.Member 
 
     data.balance = clamp_money(data.balance)
     store.set_member(guild_id, user_id, data)
-    await store.save()
+
+    if save:
+        await store.save()
+
     return data
-
-
-async def apply_daily_living_cost(guild: discord.Guild, member: discord.Member) -> tuple[bool, int, int]:
-    """Apply one day's living cost once per KST day."""
-    if guild is None:
-        return False, 0, 0
-
-    data = await ensure_registered(guild.id, member.id, member)
-    today = today_key()
-    if data.last_living_day == today:
-        return False, 0, data.balance
-
-    cost = living_cost_for(data.rank)
-    deducted = min(max(data.balance, 0), max(cost, 0))
-    data.balance = clamp_money(data.balance - deducted)
-    data.last_living_day = today
-    store.set_member(guild.id, member.id, data)
-    await store.save()
-    return True, deducted, data.balance
-
-
-async def apply_daily_living_cost_to_guild(guild: discord.Guild) -> int:
-    changed = 0
-    guild_data = store.ensure_guild(guild.id)
-    for user_id_str in list(guild_data["members"].keys()):
-        user_id = int(user_id_str)
-        member = guild.get_member(user_id)
-        if member is None:
-            try:
-                member = await guild.fetch_member(user_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                continue
-        applied, _, _ = await apply_daily_living_cost(guild, member)
-        if applied:
-            changed += 1
-    return changed
-
-
-# -----------------------------
-# Discord bot
-# -----------------------------
-
-intents = discord.Intents.default()
-intents.members = True
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-
-@bot.event
-async def on_ready() -> None:
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    if not daily_living_loop.is_running():
-        daily_living_loop.start()
-
-    try:
-        if TEST_GUILD_ID:
-            guild_obj = discord.Object(id=int(TEST_GUILD_ID))
-            bot.tree.copy_global_to(guild=guild_obj)
-            await bot.tree.sync(guild=guild_obj)
-            print(f"Synced commands to test guild {TEST_GUILD_ID}")
-        else:
-            await bot.tree.sync()
-            print("Synced global commands")
-    except Exception as exc:
-        print(f"Command sync failed: {exc}")
-
-
-@tasks.loop(hours=1)
-async def daily_living_loop() -> None:
-    """Backstop for daily living cost."""
-    for guild in bot.guilds:
-        try:
-            await apply_daily_living_cost_to_guild(guild)
-        except Exception as exc:
-            print(f"Daily living cost loop error in guild {guild.id}: {exc}")
 
 
 async def require_guild_and_member(
@@ -367,9 +266,34 @@ async def king_only(
 
 
 # -----------------------------
-# Commands
+# Discord bot
 # -----------------------------
 
+intents = discord.Intents.default()
+intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+@bot.event
+async def on_ready() -> None:
+    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+
+    try:
+        if TEST_GUILD_ID:
+            guild_obj = discord.Object(id=int(TEST_GUILD_ID))
+            bot.tree.copy_global_to(guild=guild_obj)
+            await bot.tree.sync(guild=guild_obj)
+            print(f"Synced commands to test guild {TEST_GUILD_ID}")
+        else:
+            await bot.tree.sync()
+            print("Synced global commands")
+    except Exception as exc:
+        print(f"Command sync failed: {exc}")
+
+
+# -----------------------------
+# Commands
+# -----------------------------
 
 @bot.tree.command(name="내정보", description="내 신분과 자산을 확인합니다.")
 @app_commands.describe(target="확인할 사용자")
@@ -386,7 +310,6 @@ async def myinfo(
         await interaction.response.send_message("서버 멤버만 확인할 수 있습니다.", ephemeral=True)
         return
 
-    await apply_daily_living_cost(interaction.guild, target)
     data = await ensure_registered(interaction.guild.id, target.id, target)
 
     today = today_key()
@@ -395,8 +318,6 @@ async def myinfo(
     else:
         work_status = "가능" if can_work(data.rank) else "불가"
 
-    tax_rate = store.get_tax_rate(interaction.guild.id)
-    treasury = store.get_treasury(interaction.guild.id)
     msg = (
         f"**{target.display_name}**\n"
         f"신분: **{data.rank}**\n"
@@ -409,8 +330,6 @@ async def myinfo(
 @bot.tree.command(name="일하기", description="하루에 한 번 일해서 돈을 벌 수 있습니다.")
 async def work(interaction: discord.Interaction) -> None:
     guild, member, data = await require_guild_and_member(interaction)
-    await apply_daily_living_cost(guild, member)
-    data = await ensure_registered(guild.id, member.id, member)
 
     today = today_key()
     if data.last_work_day == today:
@@ -461,22 +380,18 @@ async def tax_set(
 
 @bot.tree.command(name="국고보기", description="국고를 확인합니다.")
 async def treasury_view(interaction: discord.Interaction) -> None:
-    _, _, data = await require_guild_and_member(interaction)
+    guild, _, data = await require_guild_and_member(interaction)
     if data.rank not in {"왕", "영의정"}:
         await interaction.response.send_message("국고는 왕 또는 영의정만 확인할 수 있습니다.", ephemeral=True)
         return
 
-    treasury = store.get_treasury(interaction.guild.id)
-    tax_rate = store.get_tax_rate(interaction.guild.id)
+    treasury = store.get_treasury(guild.id)
+    tax_rate = store.get_tax_rate(guild.id)
     await interaction.response.send_message(
         f"국고: **{treasury:,}원**\n세율: **{tax_rate}%**",
         ephemeral=True,
     )
 
-
-# -----------------------------
-# 돈관리
-# -----------------------------
 
 @bot.tree.command(name="돈관리", description="왕이 특정 대상에게 돈을 지급하거나 차감합니다.")
 @app_commands.describe(
@@ -540,7 +455,8 @@ async def money_manage(
         return
 
     count = len(targets)
-    total_amount = int(amount) * count
+    per_person = int(amount)
+    total_amount = per_person * count
 
     if action.value == "give":
         if store.get_treasury(guild.id) < total_amount:
@@ -551,8 +467,8 @@ async def money_manage(
             return
 
         for target in targets:
-            data = await ensure_registered(guild.id, target.id, target)
-            data.balance += int(amount)
+            data = await ensure_registered(guild.id, target.id, target, save=False)
+            data.balance += per_person
             store.set_member(guild.id, target.id, data)
 
         store.remove_treasury(guild.id, total_amount)
@@ -566,18 +482,17 @@ async def money_manage(
             title = f"서버의 **{count}명**에게"
 
         await interaction.response.send_message(
-            f"{title} 1인당 **{int(amount):,}원**씩 지급했습니다.\n"
+            f"{title} 1인당 **{per_person:,}원**씩 지급했습니다.\n"
             f"총 지급액: **{total_amount:,}원**\n"
             f"사유: {reason}",
             ephemeral=False,
         )
         return
 
-    # 차감
     total_taken = 0
     for target in targets:
-        data = await ensure_registered(guild.id, target.id, target)
-        taken = min(data.balance, int(amount))
+        data = await ensure_registered(guild.id, target.id, target, save=False)
+        taken = min(data.balance, per_person)
         data.balance -= taken
         total_taken += taken
         store.set_member(guild.id, target.id, data)
@@ -599,36 +514,16 @@ async def money_manage(
         ephemeral=False,
     )
 
-@bot.tree.command(name="신분설정", description="왕이 사용자의 신분을 직접 설정합니다.")
-@app_commands.describe(member="대상 사용자", rank="설정할 신분")
-@app_commands.choices(rank=[app_commands.Choice(name=r, value=r) for r in RANKS])
-async def rank_set(
-    interaction: discord.Interaction,
-    member: discord.Member,
-    rank: app_commands.Choice[str],
-) -> None:
-    guild, _, _ = await king_only(interaction)
-    target = await ensure_registered(guild.id, member.id, member)
-    target.rank = rank.value
-    store.set_member(guild.id, member.id, target)
-    await store.save()
-    await sync_discord_rank_role(member, rank.value)
-    await interaction.response.send_message(
-        f"{member.mention}의 신분이 **{rank.value}**로 변경되었습니다.",
-        ephemeral=False,
-    )
 
 # -----------------------------
 # Error handling
 # -----------------------------
-
 
 @bot.tree.error
 async def on_app_command_error(
     interaction: discord.Interaction,
     error: app_commands.AppCommandError,
 ) -> None:
-    message = ""
     if isinstance(error, app_commands.CheckFailure):
         message = str(error)
     else:
@@ -643,7 +538,6 @@ async def on_app_command_error(
 # -----------------------------
 # Startup checks
 # -----------------------------
-
 
 async def warm_up_existing_guilds() -> None:
     for guild in bot.guilds:
@@ -661,11 +555,6 @@ async def on_guild_join(guild: discord.Guild) -> None:
 async def on_member_join(member: discord.Member) -> None:
     if member.guild:
         await ensure_registered(member.guild.id, member.id, member)
-
-
-@bot.event
-async def on_message(message: discord.Message) -> None:
-    await bot.process_commands(message)
 
 
 async def main() -> None:
