@@ -53,7 +53,7 @@ BLOCKED_EARN_ROLE = "유람객"
 MAX_BAX_STAGE = 10
 BASE_BAX_SUCCESS = 60
 BAX_SUCCESS_DROP = 5
-BAX_REWARD_MULTIPLIER = 1.6
+BAX_STOP_BONUS_PER_STAGE = 15
 
 
 # -----------------------------
@@ -63,9 +63,6 @@ BAX_REWARD_MULTIPLIER = 1.6
 def now_kst() -> datetime:
     return datetime.now(KST)
 
-def bax_extra_for_stage(bet: int, stage: int) -> int:
-    rate = 10 + (stage - 1) * 5   # 10% -> 15% -> ... -> 55%
-    return max(1, bet * rate // 100)
 
 def today_key(dt: datetime | None = None) -> str:
     dt = dt or now_kst()
@@ -228,6 +225,16 @@ def bax_success_rate(stage: int) -> int:
     return max(5, BASE_BAX_SUCCESS - (stage - 1) * BAX_SUCCESS_DROP)
 
 
+def bax_extra_for_stage(bet: int, stage: int) -> int:
+    rate = 10 + (stage - 1) * 5
+    return max(1, bet * rate // 100)
+
+
+def bax_stop_payout(bet: int, committed: int, stage: int) -> int:
+    bonus = (bet * stage * BAX_STOP_BONUS_PER_STAGE) // 100
+    return committed + bonus
+
+
 async def sync_discord_rank_role(member: discord.Member, new_rank: str) -> None:
     """Synchronize actual Discord roles if the server has same-named roles."""
     guild = member.guild
@@ -289,6 +296,219 @@ async def king_only(
     if not is_king(data):
         raise app_commands.CheckFailure("왕만 사용할 수 있습니다.")
     return guild, member, data
+
+
+# -----------------------------
+# 박타기 세션
+# -----------------------------
+
+@dataclass
+class BaxSession:
+    guild_id: int
+    user_id: int
+    bet: int
+    committed: int
+    stage: int = 0
+    active: bool = True
+
+    def next_stage(self) -> int:
+        return self.stage + 1
+
+    def next_rate(self) -> int:
+        return bax_success_rate(self.next_stage())
+
+    def next_extra(self) -> int:
+        return bax_extra_for_stage(self.bet, self.next_stage())
+
+
+bax_sessions: dict[tuple[int, int], BaxSession] = {}
+
+
+class BaxView(discord.ui.View):
+    def __init__(self, session: BaxSession) -> None:
+        super().__init__(timeout=300)
+        self.session = session
+
+    def _key(self) -> tuple[int, int]:
+        return (self.session.guild_id, self.session.user_id)
+
+    @discord.ui.button(label="강화", style=discord.ButtonStyle.primary)
+    async def enhance(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("서버에서만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        key = self._key()
+        session = bax_sessions.get(key)
+        if session is None or not session.active:
+            await interaction.response.send_message("진행 중인 박타기 세션이 없습니다.", ephemeral=True)
+            return
+
+        if interaction.user.id != session.user_id:
+            await interaction.response.send_message("이 세션은 본인만 조작할 수 있습니다.", ephemeral=True)
+            return
+
+        data = await ensure_registered(session.guild_id, session.user_id, interaction.user, save=False)
+
+        if session.stage >= MAX_BAX_STAGE:
+            payout = bax_stop_payout(session.bet, session.committed, session.stage)
+            data.balance += payout
+            session.active = False
+            bax_sessions.pop(key, None)
+            store.set_member(session.guild_id, session.user_id, data)
+            await store.save()
+
+            for item in self.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+
+            await interaction.response.edit_message(
+                content=(
+                    f"이미 최대 단계까지 도달했습니다.\n"
+                    f"지급액: **{payout:,}원**\n"
+                    f"현재 잔액: **{data.balance:,}원**"
+                ),
+                view=self,
+            )
+            return
+
+        next_stage = session.stage + 1
+        rate = bax_success_rate(next_stage)
+        extra = bax_extra_for_stage(session.bet, next_stage)
+
+        if data.balance < extra:
+            payout = bax_stop_payout(session.bet, session.committed, session.stage)
+            data.balance += payout
+            session.active = False
+            bax_sessions.pop(key, None)
+            store.set_member(session.guild_id, session.user_id, data)
+            await store.save()
+
+            for item in self.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+
+            await interaction.response.edit_message(
+                content=(
+                    f"다음 강화에 필요한 돈이 부족해서 자동 정산했습니다.\n"
+                    f"지급액: **{payout:,}원**\n"
+                    f"현재 잔액: **{data.balance:,}원**"
+                ),
+                view=self,
+            )
+            return
+
+        data.balance -= extra
+        session.committed += extra
+
+        roll = random.randint(1, 100)
+        if roll > rate:
+            session.active = False
+            bax_sessions.pop(key, None)
+            store.set_member(session.guild_id, session.user_id, data)
+            await store.save()
+
+            for item in self.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+
+            await interaction.response.edit_message(
+                content=(
+                    f"**{next_stage}단계 실패!**\n"
+                    f"성공 확률: **{rate}%**, 나온 수: **{roll}**\n"
+                    f"날아간 돈: **{session.committed:,}원**"
+                ),
+                view=self,
+            )
+            return
+
+        session.stage = next_stage
+
+        if session.stage >= MAX_BAX_STAGE:
+            payout = bax_stop_payout(session.bet, session.committed, session.stage)
+            data.balance += payout
+            session.active = False
+            bax_sessions.pop(key, None)
+            store.set_member(session.guild_id, session.user_id, data)
+            await store.save()
+
+            for item in self.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+
+            await interaction.response.edit_message(
+                content=(
+                    f"**10단계 성공!**\n"
+                    f"성공 확률: **{rate}%**, 나온 수: **{roll}**\n"
+                    f"누적 판돈: **{session.committed:,}원**\n"
+                    f"지급액: **{payout:,}원**\n"
+                    f"현재 잔액: **{data.balance:,}원**"
+                ),
+                view=self,
+            )
+            return
+
+        store.set_member(session.guild_id, session.user_id, data)
+        await store.save()
+
+        await interaction.response.edit_message(
+            content=(
+                f"**{session.stage}단계 성공!**\n"
+                f"성공 확률: **{rate}%**, 나온 수: **{roll}**\n"
+                f"다음 단계 성공 확률: **{session.next_rate()}%**\n"
+                f"다음 추가 금액: **{session.next_extra():,}원**\n"
+                f"현재 누적 판돈: **{session.committed:,}원**\n"
+                f"원하면 아래 버튼으로 계속하거나 멈출 수 있습니다."
+            ),
+            view=self,
+        )
+
+    @discord.ui.button(label="그만하기", style=discord.ButtonStyle.danger)
+    async def stop(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("서버에서만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        key = self._key()
+        session = bax_sessions.get(key)
+        if session is None or not session.active:
+            await interaction.response.send_message("진행 중인 박타기 세션이 없습니다.", ephemeral=True)
+            return
+
+        if interaction.user.id != session.user_id:
+            await interaction.response.send_message("이 세션은 본인만 조작할 수 있습니다.", ephemeral=True)
+            return
+
+        data = await ensure_registered(session.guild_id, session.user_id, interaction.user, save=False)
+        payout = bax_stop_payout(session.bet, session.committed, session.stage)
+        data.balance += payout
+
+        session.active = False
+        bax_sessions.pop(key, None)
+        store.set_member(session.guild_id, session.user_id, data)
+        await store.save()
+
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+        await interaction.response.edit_message(
+            content=(
+                f"정산 완료.\n"
+                f"현재 단계: **{session.stage}단계**\n"
+                f"지급액: **{payout:,}원**\n"
+                f"현재 잔액: **{data.balance:,}원**"
+            ),
+            view=self,
+        )
 
 
 # -----------------------------
@@ -623,7 +843,7 @@ async def money_manage(
     )
 
 
-@bot.tree.command(name="박타기", description="1단계부터 10단계까지 박을 타는 고위험 컨텐츠입니다.")
+@bot.tree.command(name="박타기", description="한 단계씩 강화하면서 중간에 멈출 수 있습니다.")
 @app_commands.describe(
     bet="처음 걸 금액",
 )
@@ -645,6 +865,11 @@ async def bax_taogi(
         await interaction.response.send_message("유람객은 /박타기를 할 수 없습니다.", ephemeral=True)
         return
 
+    key = (interaction.guild.id, member.id)
+    if key in bax_sessions and bax_sessions[key].active:
+        await interaction.response.send_message("이미 진행 중인 박타기 세션이 있습니다.", ephemeral=True)
+        return
+
     data = await ensure_registered(interaction.guild.id, member.id, member)
 
     if data.balance < bet:
@@ -657,62 +882,30 @@ async def bax_taogi(
         return
 
     data.balance -= bet
-    committed = bet
-
-    for stage in range(1, MAX_BAX_STAGE + 1):
-        rate = bax_success_rate(stage)
-        roll = random.randint(1, 100)
-
-        if roll > rate:
-            store.set_member(interaction.guild.id, member.id, data)
-            await store.save()
-            await interaction.response.send_message(
-                f"**{stage}단계**에서 실패했습니다.\n"
-                f"성공 확률: **{rate}%**, 나온 수: **{roll}**\n"
-                f"날아간 돈: **{committed:,}원**",
-                ephemeral=False,
-            )
-            return
-
-        if stage == MAX_BAX_STAGE:
-            payout = int(committed * BAX_REWARD_MULTIPLIER)
-            data.balance += payout
-            store.set_member(interaction.guild.id, member.id, data)
-            await store.save()
-
-            await interaction.response.send_message(
-                f"**10단계 전부 성공!**\n"
-                f"성공 확률: **{rate}%**, 나온 수: **{roll}**\n"
-                f"베팅: **{bet:,}원**, 누적 판돈: **{committed:,}원**\n"
-                f"지급액: **{payout:,}원**\n"
-                f"현재 잔액: **{data.balance:,}원**",
-                ephemeral=False,
-            )
-            return
-
-        extra = bax_extra_for_stage(bet, stage)
-
-        if data.balance < extra:
-            payout = int(committed * BAX_REWARD_MULTIPLIER)
-            data.balance += payout
-            store.set_member(interaction.guild.id, member.id, data)
-            await store.save()
-
-            await interaction.response.send_message(
-                f"**{stage}단계**까지 성공했지만, 다음 단계 추가 금액이 부족해서 여기서 종료했습니다.\n"
-                f"다음 단계 필요 금액: **{extra:,}원**\n"
-                f"지급액: **{payout:,}원**\n"
-                f"현재 잔액: **{data.balance:,}원**",
-                ephemeral=False,
-            )
-            return
-
-        data.balance -= extra
-        committed += extra
-
-    # 이론상 도달하지 않음
     store.set_member(interaction.guild.id, member.id, data)
     await store.save()
+
+    session = BaxSession(
+        guild_id=interaction.guild.id,
+        user_id=member.id,
+        bet=bet,
+        committed=bet,
+        stage=0,
+        active=True,
+    )
+    bax_sessions[key] = session
+    view = BaxView(session)
+
+    await interaction.response.send_message(
+        f"/박타기 시작\n"
+        f"베팅 금액: **{bet:,}원**\n"
+        f"현재 단계: **0단계**\n"
+        f"다음 성공 확률: **{session.next_rate()}%**\n"
+        f"다음 추가 금액: **{session.next_extra():,}원**\n"
+        f"아래 버튼으로 한 단계씩 진행하거나 중간에 멈출 수 있습니다.",
+        view=view,
+        ephemeral=False,
+    )
 
 
 # -----------------------------
