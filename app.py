@@ -77,6 +77,7 @@ BAX_STAGE_MULTIPLIERS: dict[int, float] = {
 # -----------------------------
 
 NOGADA_COOLDOWN_SECONDS = 5
+nogada_last_used: dict[tuple[int, int], float] = {}
 
 # -----------------------------
 # Storage
