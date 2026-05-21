@@ -50,14 +50,25 @@ BLOCKED_EARN_ROLE = "유람객"
 # -----------------------------
 # 박타기 설정
 # -----------------------------
+#
+# 초반 실패 체감을 줄이기 위해 확률을 완만하게 조정
+# 1단계부터 80%는 체감상 너무 자주 터져서, 초반은 더 넉넉하게 설정
+#
+BAX_SUCCESS_TABLE: dict[int, int] = {
+    1: 98,
+    2: 95,
+    3: 91,
+    4: 86,
+    5: 80,
+    6: 73,
+    7: 65,
+    8: 56,
+    9: 46,
+    10: 35,
+}
 
 MAX_BAX_STAGE = 10
-BASE_BAX_SUCCESS = 80
-BAX_SUCCESS_DROP = 8
 
-# stage 0 = 시작 직후
-# stage 1 = 1단계 성공 후
-# stage 10 = 최종 성공 후
 BAX_STAGE_MULTIPLIERS: dict[int, float] = {
     0: 1.0,
     1: 1.2,
@@ -244,7 +255,9 @@ def can_receive_money(member: discord.Member) -> bool:
 
 
 def bax_success_rate(stage: int) -> int:
-    return max(8, BASE_BAX_SUCCESS - (stage - 1) * BAX_SUCCESS_DROP)
+    if stage <= 0:
+        return 100
+    return BAX_SUCCESS_TABLE.get(stage, 35)
 
 
 def bax_multiplier(stage: int) -> float:
