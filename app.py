@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +45,15 @@ DEFAULT_RANK = "상민"
 
 ROLE_NAMES = {rank: rank for rank in RANKS}
 BLOCKED_EARN_ROLE = "유람객"
+
+# -----------------------------
+# 박타기 설정
+# -----------------------------
+
+MAX_BAX_STAGE = 10
+BASE_BAX_SUCCESS = 60
+BAX_SUCCESS_DROP = 5
+BAX_REWARD_MULTIPLIER = 1.6
 
 
 # -----------------------------
@@ -209,6 +219,10 @@ def has_role_name(member: discord.Member, role_name: str) -> bool:
 
 def can_receive_money(member: discord.Member) -> bool:
     return not has_role_name(member, BLOCKED_EARN_ROLE)
+
+
+def bax_success_rate(stage: int) -> int:
+    return max(5, BASE_BAX_SUCCESS - (stage - 1) * BAX_SUCCESS_DROP)
 
 
 async def sync_discord_rank_role(member: discord.Member, new_rank: str) -> None:
@@ -604,6 +618,100 @@ async def money_manage(
         f"남은 국고: **{store.get_treasury(guild.id):,}원**",
         ephemeral=False,
     )
+
+
+@bot.tree.command(name="박타기", description="1단계부터 10단계까지 도전하는 고위험 컨텐츠입니다.")
+@app_commands.describe(
+    bet="처음 걸 금액",
+    extra="성공할 때마다 추가로 걸 금액",
+)
+async def bax_taogi(
+    interaction: discord.Interaction,
+    bet: app_commands.Range[int, 1, 10_000_000_000],
+    extra: app_commands.Range[int, 1, 10_000_000_000],
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("서버에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("서버 멤버만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    member = interaction.user
+
+    if has_role_name(member, BLOCKED_EARN_ROLE):
+        await interaction.response.send_message("유람객은 /박타기를 할 수 없습니다.", ephemeral=True)
+        return
+
+    data = await ensure_registered(interaction.guild.id, member.id, member)
+
+    if data.balance < bet:
+        await interaction.response.send_message(
+            f"잔액이 부족합니다.\n"
+            f"현재 잔액: **{data.balance:,}원**\n"
+            f"필요 금액: **{bet:,}원**",
+            ephemeral=True,
+        )
+        return
+
+    # 처음 베팅금 차감
+    data.balance -= bet
+    committed = bet
+
+    for stage in range(1, MAX_BAX_STAGE + 1):
+        rate = bax_success_rate(stage)
+        roll = random.randint(1, 100)
+
+        if roll > rate:
+            store.set_member(interaction.guild.id, member.id, data)
+            await store.save()
+            await interaction.response.send_message(
+                f"**{stage}단계**에서 실패했습니다.\n"
+                f"성공 확률: **{rate}%**, 나온 수: **{roll}**\n"
+                f"날아간 돈: **{committed:,}원**",
+                ephemeral=False,
+            )
+            return
+
+        if stage == MAX_BAX_STAGE:
+            payout = int(committed * BAX_REWARD_MULTIPLIER)
+            data.balance += payout
+            store.set_member(interaction.guild.id, member.id, data)
+            await store.save()
+
+            await interaction.response.send_message(
+                f"**10단계 전부 성공!**\n"
+                f"성공 확률: **{rate}%**, 나온 수: **{roll}**\n"
+                f"베팅: **{bet:,}원**, 누적 판돈: **{committed:,}원**\n"
+                f"지급액: **{payout:,}원**\n"
+                f"현재 잔액: **{data.balance:,}원**",
+                ephemeral=False,
+            )
+            return
+
+        # 다음 단계로 갈수록 추가 베팅이 붙음
+        if data.balance < extra:
+            payout = int(committed * BAX_REWARD_MULTIPLIER)
+            data.balance += payout
+            store.set_member(interaction.guild.id, member.id, data)
+            await store.save()
+
+            await interaction.response.send_message(
+                f"**{stage}단계**까지 성공했지만, 다음 단계 추가 금액이 부족해서 여기서 종료했습니다.\n"
+                f"성공 확률: **{rate}%**, 나온 수: **{roll}**\n"
+                f"지급액: **{payout:,}원**\n"
+                f"현재 잔액: **{data.balance:,}원**",
+                ephemeral=False,
+            )
+            return
+
+        data.balance -= extra
+        committed += extra
+
+    # 이론상 도달하지 않음
+    store.set_member(interaction.guild.id, member.id, data)
+    await store.save()
 
 
 # -----------------------------
