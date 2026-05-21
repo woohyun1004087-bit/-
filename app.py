@@ -51,10 +51,12 @@ BLOCKED_EARN_ROLE = "유람객"
 # -----------------------------
 
 MAX_BAX_STAGE = 10
-BASE_BAX_SUCCESS = 60
-BAX_SUCCESS_DROP = 5
+BASE_BAX_SUCCESS = 70
+BAX_SUCCESS_DROP = 7
 
-# stage 0 = 시작 직후, stage 1 = 1단계 성공 후, ...
+# stage 0 = 시작 직후
+# stage 1 = 1단계 성공 후
+# stage 10 = 최종 성공 후
 BAX_STAGE_MULTIPLIERS: dict[int, float] = {
     0: 1.0,
     1: 1.2,
@@ -244,9 +246,12 @@ def bax_extra_for_stage(bet: int, stage: int) -> int:
     return max(1, bet * rate // 100)
 
 
+def bax_multiplier(stage: int) -> float:
+    return BAX_STAGE_MULTIPLIERS.get(stage, 1.0)
+
+
 def bax_payout_for_stage(committed: int, stage: int) -> int:
-    multiplier = BAX_STAGE_MULTIPLIERS.get(stage, 1.0)
-    return int(committed * multiplier)
+    return int(committed * bax_multiplier(stage))
 
 
 async def sync_discord_rank_role(member: discord.Member, new_rank: str) -> None:
@@ -383,6 +388,7 @@ class BaxView(discord.ui.View):
             await interaction.response.edit_message(
                 content=(
                     f"이미 최대 단계까지 도달했습니다.\n"
+                    f"현재 배율: **{bax_multiplier(session.stage):.1f}배**\n"
                     f"지급액: **{payout:,}원**\n"
                     f"현재 잔액: **{data.balance:,}원**"
                 ),
@@ -409,6 +415,7 @@ class BaxView(discord.ui.View):
             await interaction.response.edit_message(
                 content=(
                     f"다음 강화에 필요한 돈이 부족해서 자동 정산했습니다.\n"
+                    f"현재 배율: **{bax_multiplier(session.stage):.1f}배**\n"
                     f"지급액: **{payout:,}원**\n"
                     f"현재 잔액: **{data.balance:,}원**"
                 ),
@@ -458,6 +465,7 @@ class BaxView(discord.ui.View):
                 content=(
                     f"**10단계 성공!**\n"
                     f"성공 확률: **{rate}%**, 나온 수: **{roll}**\n"
+                    f"현재 배율: **{bax_multiplier(session.stage):.1f}배**\n"
                     f"누적 판돈: **{session.committed:,}원**\n"
                     f"지급액: **{payout:,}원**\n"
                     f"현재 잔액: **{data.balance:,}원**"
@@ -469,13 +477,20 @@ class BaxView(discord.ui.View):
         store.set_member(session.guild_id, session.user_id, data)
         await store.save()
 
+        current_stop_payout = bax_payout_for_stage(session.committed, session.stage)
+        next_stop_payout = bax_payout_for_stage(
+            session.committed + bax_extra_for_stage(session.bet, session.stage + 1),
+            session.stage + 1,
+        )
+
         await interaction.response.edit_message(
             content=(
                 f"**{session.stage}단계 성공!**\n"
                 f"성공 확률: **{rate}%**, 나온 수: **{roll}**\n"
-                f"다음 단계 성공 확률: **{session.next_rate()}%**\n"
+                f"현재 배율: **{bax_multiplier(session.stage):.1f}배**\n"
+                f"지금 그만두면: **{current_stop_payout:,}원**\n"
+                f"다음 단계 성공 시 예상 지급액: **{next_stop_payout:,}원**\n"
                 f"다음 추가 금액: **{session.next_extra():,}원**\n"
-                f"현재 누적 판돈: **{session.committed:,}원**\n"
                 f"원하면 아래 버튼으로 계속하거나 멈출 수 있습니다."
             ),
             view=self,
@@ -518,7 +533,7 @@ class BaxView(discord.ui.View):
             content=(
                 f"정산 완료.\n"
                 f"현재 단계: **{session.stage}단계**\n"
-                f"배율: **{BAX_STAGE_MULTIPLIERS.get(session.stage, 1.0)}배**\n"
+                f"배율: **{bax_multiplier(session.stage):.1f}배**\n"
                 f"지급액: **{payout:,}원**\n"
                 f"현재 잔액: **{data.balance:,}원**"
             ),
@@ -531,6 +546,7 @@ class BaxView(discord.ui.View):
         if session is not None:
             session.active = False
             bax_sessions.pop(key, None)
+
         for item in self.children:
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
@@ -925,6 +941,8 @@ async def bax_taogi(
         f"/박타기 시작\n"
         f"베팅 금액: **{bet:,}원**\n"
         f"현재 단계: **0단계**\n"
+        f"현재 배율: **{bax_multiplier(0):.1f}배**\n"
+        f"지금 그만두면: **{bax_payout_for_stage(bet, 0):,}원**\n"
         f"다음 성공 확률: **{session.next_rate()}%**\n"
         f"다음 추가 금액: **{session.next_extra():,}원**\n"
         f"아래 버튼으로 한 단계씩 진행하거나 중간에 멈출 수 있습니다.",
