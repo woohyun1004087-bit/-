@@ -52,8 +52,8 @@ BLOCKED_EARN_ROLE = "유람객"
 # -----------------------------
 
 MAX_BAX_STAGE = 10
-BASE_BAX_SUCCESS = 70
-BAX_SUCCESS_DROP = 7
+BASE_BAX_SUCCESS = 80
+BAX_SUCCESS_DROP = 8
 
 # stage 0 = 시작 직후
 # stage 1 = 1단계 성공 후
