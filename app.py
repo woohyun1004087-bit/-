@@ -620,15 +620,13 @@ async def money_manage(
     )
 
 
-@bot.tree.command(name="박타기", description="1단계부터 10단계까지 도전하는 고위험 컨텐츠입니다.")
+@bot.tree.command(name="박타기", description="1단계부터 10단계까지 박을 타는 고위험 컨텐츠입니다.")
 @app_commands.describe(
     bet="처음 걸 금액",
-    extra="성공할 때마다 추가로 걸 금액",
 )
 async def bax_taogi(
     interaction: discord.Interaction,
     bet: app_commands.Range[int, 1, 10_000_000_000],
-    extra: app_commands.Range[int, 1, 10_000_000_000],
 ) -> None:
     if interaction.guild is None:
         await interaction.response.send_message("서버에서만 사용할 수 있습니다.", ephemeral=True)
@@ -655,7 +653,6 @@ async def bax_taogi(
         )
         return
 
-    # 처음 베팅금 차감
     data.balance -= bet
     committed = bet
 
@@ -690,7 +687,8 @@ async def bax_taogi(
             )
             return
 
-        # 다음 단계로 갈수록 추가 베팅이 붙음
+        extra = bax_extra_for_stage(bet, stage)
+
         if data.balance < extra:
             payout = int(committed * BAX_REWARD_MULTIPLIER)
             data.balance += payout
@@ -699,7 +697,7 @@ async def bax_taogi(
 
             await interaction.response.send_message(
                 f"**{stage}단계**까지 성공했지만, 다음 단계 추가 금액이 부족해서 여기서 종료했습니다.\n"
-                f"성공 확률: **{rate}%**, 나온 수: **{roll}**\n"
+                f"다음 단계 필요 금액: **{extra:,}원**\n"
                 f"지급액: **{payout:,}원**\n"
                 f"현재 잔액: **{data.balance:,}원**",
                 ephemeral=False,
