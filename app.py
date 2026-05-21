@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import random
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -70,6 +71,12 @@ BAX_STAGE_MULTIPLIERS: dict[int, float] = {
     9: 10.0,
     10: 15.0,
 }
+
+# -----------------------------
+# 노가다 설정
+# -----------------------------
+
+NOGADA_COOLDOWN_SECONDS = 5
 
 # -----------------------------
 # Storage
@@ -181,7 +188,6 @@ class EconomyStore:
 
 
 store = EconomyStore(DATA_FILE)
-
 
 # -----------------------------
 # Helpers
@@ -378,6 +384,10 @@ class BaxView(discord.ui.View):
         if roll > rate:
             session.active = False
             bax_sessions.pop(key, None)
+
+            # 실패 시 베팅 금액 전액을 국고로
+            store.add_treasury(session.guild_id, session.committed)
+
             store.set_member(session.guild_id, session.user_id, data)
             await store.save()
 
@@ -389,8 +399,8 @@ class BaxView(discord.ui.View):
                 content=(
                     f"**{next_stage}단계 실패!**\n"
                     f"성공 확률: **{rate}%**, 나온 수: **{roll}**\n"
-                    f"박타기 결과는 실패로 종료되었습니다.\n"
-                    f"누적 판돈은 사라집니다."
+                    f"베팅 금액 **{session.committed:,}원**이 국고로 들어갔습니다.\n"
+                    f"박타기 결과는 실패로 종료되었습니다."
                 ),
                 view=self,
             )
@@ -612,6 +622,68 @@ async def work(interaction: discord.Interaction) -> None:
 
     await interaction.response.send_message(
         f"{member.mention}이(가) 일해서 **{pay:,}원** 벌었습니다.\n"
+        f"세금 **{tax:,}원**이 국고로 들어가고, 실제 수령액은 **{net:,}원**입니다.",
+        ephemeral=False,
+    )
+
+
+@bot.tree.command(name="노가다", description="짧은 쿨타임으로 일하기의 10분의 1만큼 벌 수 있습니다.")
+async def nogada(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("서버에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("서버 멤버만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    member = interaction.user
+    guild = interaction.guild
+    key = (guild.id, member.id)
+
+    if has_role_name(member, BLOCKED_EARN_ROLE):
+        await interaction.response.send_message("유람객은 /노가다를 할 수 없습니다.", ephemeral=True)
+        return
+
+    data = await ensure_registered(guild.id, member.id, member)
+
+    if data.rank == "왕":
+        await interaction.response.send_message("왕은 /노가다를 할 수 없습니다.", ephemeral=True)
+        return
+
+    if data.rank == "천민":
+        await interaction.response.send_message("천민은 /노가다를 할 수 없습니다.", ephemeral=True)
+        return
+
+    base_pay = work_pay_for(data.rank) // 10
+    if base_pay <= 0:
+        await interaction.response.send_message("현재 신분으로는 노가다를 할 수 없습니다.", ephemeral=True)
+        return
+
+    now = time.monotonic()
+    last_used = nogada_last_used.get(key, 0.0)
+    elapsed = now - last_used
+    if elapsed < NOGADA_COOLDOWN_SECONDS:
+        remaining = NOGADA_COOLDOWN_SECONDS - elapsed
+        await interaction.response.send_message(
+            f"/노가다는 아직 쿨타임입니다. **{remaining:.1f}초** 후에 다시 시도하세요.",
+            ephemeral=True,
+        )
+        return
+
+    nogada_last_used[key] = now
+
+    tax_rate = store.get_tax_rate(guild.id)
+    tax = (base_pay * tax_rate) // 100
+    net = base_pay - tax
+
+    data.balance += net
+    store.set_member(guild.id, member.id, data)
+    store.add_treasury(guild.id, tax)
+    await store.save()
+
+    await interaction.response.send_message(
+        f"{member.mention}이(가) /노가다로 **{base_pay:,}원** 벌었습니다.\n"
         f"세금 **{tax:,}원**이 국고로 들어가고, 실제 수령액은 **{net:,}원**입니다.",
         ephemeral=False,
     )
