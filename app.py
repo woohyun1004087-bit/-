@@ -244,7 +244,7 @@ def can_receive_money(member: discord.Member) -> bool:
 
 
 def bax_success_rate(stage: int) -> int:
-    return max(5, BASE_BAX_SUCCESS - (stage - 1) * BAX_SUCCESS_DROP)
+    return max(8, BASE_BAX_SUCCESS - (stage - 1) * BAX_SUCCESS_DROP)
 
 
 def bax_multiplier(stage: int) -> float:
