@@ -63,6 +63,9 @@ BAX_REWARD_MULTIPLIER = 1.6
 def now_kst() -> datetime:
     return datetime.now(KST)
 
+def bax_extra_for_stage(bet: int, stage: int) -> int:
+    rate = 10 + (stage - 1) * 5   # 10% -> 15% -> ... -> 55%
+    return max(1, bet * rate // 100)
 
 def today_key(dt: datetime | None = None) -> str:
     dt = dt or now_kst()
