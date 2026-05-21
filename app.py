@@ -53,7 +53,21 @@ BLOCKED_EARN_ROLE = "유람객"
 MAX_BAX_STAGE = 10
 BASE_BAX_SUCCESS = 60
 BAX_SUCCESS_DROP = 5
-BAX_STOP_BONUS_PER_STAGE = 50
+
+# stage 0 = 시작 직후, stage 1 = 1단계 성공 후, ...
+BAX_STAGE_MULTIPLIERS: dict[int, float] = {
+    0: 1.0,
+    1: 1.2,
+    2: 1.5,
+    3: 1.9,
+    4: 2.5,
+    5: 3.2,
+    6: 4.2,
+    7: 5.6,
+    8: 7.5,
+    9: 10.0,
+    10: 15.0,
+}
 
 
 # -----------------------------
@@ -230,9 +244,9 @@ def bax_extra_for_stage(bet: int, stage: int) -> int:
     return max(1, bet * rate // 100)
 
 
-def bax_stop_payout(bet: int, committed: int, stage: int) -> int:
-    bonus = (bet * stage * BAX_STOP_BONUS_PER_STAGE) // 100
-    return committed + bonus
+def bax_payout_for_stage(committed: int, stage: int) -> int:
+    multiplier = BAX_STAGE_MULTIPLIERS.get(stage, 1.0)
+    return int(committed * multiplier)
 
 
 async def sync_discord_rank_role(member: discord.Member, new_rank: str) -> None:
@@ -355,7 +369,7 @@ class BaxView(discord.ui.View):
         data = await ensure_registered(session.guild_id, session.user_id, interaction.user, save=False)
 
         if session.stage >= MAX_BAX_STAGE:
-            payout = bax_stop_payout(session.bet, session.committed, session.stage)
+            payout = bax_payout_for_stage(session.committed, session.stage)
             data.balance += payout
             session.active = False
             bax_sessions.pop(key, None)
@@ -381,7 +395,7 @@ class BaxView(discord.ui.View):
         extra = bax_extra_for_stage(session.bet, next_stage)
 
         if data.balance < extra:
-            payout = bax_stop_payout(session.bet, session.committed, session.stage)
+            payout = bax_payout_for_stage(session.committed, session.stage)
             data.balance += payout
             session.active = False
             bax_sessions.pop(key, None)
@@ -429,7 +443,7 @@ class BaxView(discord.ui.View):
         session.stage = next_stage
 
         if session.stage >= MAX_BAX_STAGE:
-            payout = bax_stop_payout(session.bet, session.committed, session.stage)
+            payout = bax_payout_for_stage(session.committed, session.stage)
             data.balance += payout
             session.active = False
             bax_sessions.pop(key, None)
@@ -488,7 +502,7 @@ class BaxView(discord.ui.View):
             return
 
         data = await ensure_registered(session.guild_id, session.user_id, interaction.user, save=False)
-        payout = bax_stop_payout(session.bet, session.committed, session.stage)
+        payout = bax_payout_for_stage(session.committed, session.stage)
         data.balance += payout
 
         session.active = False
@@ -504,11 +518,22 @@ class BaxView(discord.ui.View):
             content=(
                 f"정산 완료.\n"
                 f"현재 단계: **{session.stage}단계**\n"
+                f"배율: **{BAX_STAGE_MULTIPLIERS.get(session.stage, 1.0)}배**\n"
                 f"지급액: **{payout:,}원**\n"
                 f"현재 잔액: **{data.balance:,}원**"
             ),
             view=self,
         )
+
+    async def on_timeout(self) -> None:
+        key = self._key()
+        session = bax_sessions.get(key)
+        if session is not None:
+            session.active = False
+            bax_sessions.pop(key, None)
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
 
 
 # -----------------------------
