@@ -76,7 +76,7 @@ BAX_STAGE_MULTIPLIERS: dict[int, float] = {
 # 노가다 설정
 # -----------------------------
 
-NOGADA_COOLDOWN_SECONDS = 5
+NOGADA_COOLDOWN_SECONDS = 10
 nogada_last_used: dict[tuple[int, int], float] = {}
 
 # -----------------------------
