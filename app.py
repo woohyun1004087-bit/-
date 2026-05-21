@@ -71,7 +71,6 @@ BAX_STAGE_MULTIPLIERS: dict[int, float] = {
     10: 15.0,
 }
 
-
 # -----------------------------
 # Storage
 # -----------------------------
@@ -350,46 +349,6 @@ class BaxView(discord.ui.View):
     def _key(self) -> tuple[int, int]:
         return (self.session.guild_id, self.session.user_id)
 
-    async def _settle_and_disable(
-        self,
-        interaction: discord.Interaction,
-        message: str,
-    ) -> None:
-        key = self._key()
-        session = bax_sessions.get(key)
-        if session is None:
-            await interaction.response.send_message("진행 중인 박타기 세션이 없습니다.", ephemeral=True)
-            return
-
-        data = await ensure_registered(session.guild_id, session.user_id, interaction.user, save=False)
-        tax_rate = store.get_tax_rate(session.guild_id)
-        gross, tax, net = bax_settlement_for_stage(session.committed, session.stage, tax_rate)
-
-        data.balance += net
-        store.add_treasury(session.guild_id, tax)
-
-        session.active = False
-        bax_sessions.pop(key, None)
-        store.set_member(session.guild_id, session.user_id, data)
-        await store.save()
-
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
-
-        await interaction.response.edit_message(
-            content=(
-                f"{message}\n"
-                f"현재 단계: **{session.stage}단계**\n"
-                f"현재 배율: **{bax_multiplier(session.stage):.1f}배**\n"
-                f"총 지급액: **{gross:,}원**\n"
-                f"세금: **{tax:,}원**\n"
-                f"실수령액: **{net:,}원**\n"
-                f"현재 잔액: **{data.balance:,}원**"
-            ),
-            view=self,
-        )
-
     @discord.ui.button(label="강화", style=discord.ButtonStyle.primary)
     async def enhance(
         self,
@@ -414,8 +373,8 @@ class BaxView(discord.ui.View):
 
         next_stage = session.stage + 1
         rate = bax_success_rate(next_stage)
-
         roll = random.randint(1, 100)
+
         if roll > rate:
             session.active = False
             bax_sessions.pop(key, None)
@@ -471,7 +430,7 @@ class BaxView(discord.ui.View):
             )
             return
 
-        next_gross, next_tax, next_net = bax_settlement_for_stage(
+        _, _, next_net = bax_settlement_for_stage(
             session.committed,
             session.stage + 1,
             tax_rate,
@@ -794,6 +753,14 @@ async def money_manage(
         if role is None:
             await interaction.response.send_message("대상 역할을 지정해야 합니다.", ephemeral=True)
             return
+
+        if any(m.bot for m in role.members):
+            await interaction.response.send_message(
+                "해당 역할에 봇이 포함되어 있어서 지급할 수 없습니다.",
+                ephemeral=True,
+            )
+            return
+
         targets = [m for m in role.members if not m.bot]
         if not targets:
             await interaction.response.send_message("해당 역할에 대상이 없습니다.", ephemeral=True)
@@ -937,7 +904,7 @@ async def bax_taogi(
     view = BaxView(session)
 
     tax_rate = store.get_tax_rate(interaction.guild.id)
-    gross, tax, net = bax_settlement_for_stage(bet, 0, tax_rate)
+    _, _, net = bax_settlement_for_stage(bet, 0, tax_rate)
 
     await interaction.response.send_message(
         f"/박타기 시작\n"
