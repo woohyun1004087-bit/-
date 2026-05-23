@@ -48,11 +48,16 @@ ROLE_NAMES = {rank: rank for rank in RANKS}
 BLOCKED_EARN_ROLE = "유람객"
 
 # -----------------------------
+# 금고 설정
+# -----------------------------
+
+DEFAULT_VAULT_DAILY_INTEREST_RATE = 1.0  # 서버 초기 금고 이자율(%)
+
+# -----------------------------
 # 박타기 설정
 # -----------------------------
 #
 # 초반 실패 체감을 줄이기 위해 확률을 완만하게 조정
-# 1단계부터 80%는 체감상 너무 자주 터져서, 초반은 더 넉넉하게 설정
 #
 BAX_SUCCESS_TABLE: dict[int, int] = {
     1: 90,
@@ -68,7 +73,7 @@ BAX_SUCCESS_TABLE: dict[int, int] = {
 }
 
 MAX_BAX_STAGE = 10
-BAX_VIEW_TIMEOUT_SECONDS = 300
+BAX_VIEW_TIMEOUT_SECONDS = 10
 
 BAX_STAGE_MULTIPLIERS: dict[int, float] = {
     0: 1.0,
@@ -114,6 +119,8 @@ class MemberData:
     rank: str = DEFAULT_RANK
     balance: int = DEFAULT_BALANCE
     last_work_day: str = ""
+    vault_balance: int = 0
+    vault_last_interest_day: str = ""
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "MemberData":
@@ -121,6 +128,8 @@ class MemberData:
             rank=raw.get("rank", DEFAULT_RANK),
             balance=int(raw.get("balance", DEFAULT_BALANCE)),
             last_work_day=raw.get("last_work_day", ""),
+            vault_balance=int(raw.get("vault_balance", 0)),
+            vault_last_interest_day=raw.get("vault_last_interest_day", ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -128,6 +137,8 @@ class MemberData:
             "rank": self.rank,
             "balance": self.balance,
             "last_work_day": self.last_work_day,
+            "vault_balance": self.vault_balance,
+            "vault_last_interest_day": self.vault_last_interest_day,
         }
 
 
@@ -160,10 +171,12 @@ class EconomyStore:
             guilds[gid] = {
                 "tax_rate": DEFAULT_TAX_RATE,
                 "treasury": 0,
+                "vault_interest_rate": DEFAULT_VAULT_DAILY_INTEREST_RATE,
                 "members": {},
             }
         guilds[gid].setdefault("tax_rate", DEFAULT_TAX_RATE)
         guilds[gid].setdefault("treasury", 0)
+        guilds[gid].setdefault("vault_interest_rate", DEFAULT_VAULT_DAILY_INTEREST_RATE)
         guilds[gid].setdefault("members", {})
         return guilds[gid]
 
@@ -199,6 +212,12 @@ class EconomyStore:
             return False
         guild["treasury"] = treasury - int(amount)
         return True
+
+    def get_vault_interest_rate(self, guild_id: int) -> float:
+        return float(self.ensure_guild(guild_id)["vault_interest_rate"])
+
+    def set_vault_interest_rate(self, guild_id: int, rate: float) -> None:
+        self.ensure_guild(guild_id)["vault_interest_rate"] = float(rate)
 
 
 store = EconomyStore(DATA_FILE)
@@ -278,6 +297,67 @@ def bax_settlement_for_stage(committed: int, stage: int, tax_rate: int) -> tuple
     return gross, tax, net
 
 
+def apply_vault_interest(guild_id: int, member_data: MemberData) -> int:
+    """
+    금고 잔액에 대해 지난 날짜 수만큼 이자를 적용합니다.
+    이자는 국고에서 차감됩니다.
+    반환값: 이번에 실제로 지급된 이자 금액
+    """
+    today = today_key()
+    rate = store.get_vault_interest_rate(guild_id)
+
+    if member_data.vault_last_interest_day == "":
+        member_data.vault_last_interest_day = today
+        return 0
+
+    if member_data.vault_last_interest_day == today:
+        return 0
+
+    try:
+        last_dt = datetime.strptime(member_data.vault_last_interest_day, "%Y-%m-%d")
+        today_dt = datetime.strptime(today, "%Y-%m-%d")
+        days = max((today_dt - last_dt).days, 0)
+    except Exception:
+        member_data.vault_last_interest_day = today
+        return 0
+
+    if days <= 0:
+        member_data.vault_last_interest_day = today
+        return 0
+
+    if member_data.vault_balance <= 0:
+        member_data.vault_last_interest_day = today
+        return 0
+
+    paid_total = 0
+
+    for _ in range(days):
+        if member_data.vault_balance <= 0:
+            break
+
+        treasury = store.get_treasury(guild_id)
+        if treasury <= 0:
+            break
+
+        daily_interest = int(member_data.vault_balance * (rate / 100.0))
+        if daily_interest <= 0:
+            continue
+
+        paid = min(daily_interest, treasury)
+        if paid <= 0:
+            break
+
+        member_data.vault_balance += paid
+        store.remove_treasury(guild_id, paid)
+        paid_total += paid
+
+        if paid < daily_interest:
+            break
+
+    member_data.vault_last_interest_day = today
+    return paid_total
+
+
 async def sync_discord_rank_role(member: discord.Member, new_rank: str) -> None:
     """Synchronize actual Discord roles if the server has same-named roles."""
     guild = member.guild
@@ -303,19 +383,27 @@ async def ensure_registered(
     save: bool = True,
 ) -> MemberData:
     data = store.get_member(guild_id, user_id)
+    changed = False
 
     if member is not None and member.guild.id == guild_id and member.id == user_id:
         inferred_rank, has_rank_role = infer_rank_from_member(member)
         if has_rank_role and data.rank != inferred_rank:
             data.rank = inferred_rank
+            changed = True
 
     if data.rank not in RANKS:
         data.rank = DEFAULT_RANK
+        changed = True
 
     data.balance = clamp_money(data.balance)
+
+    vault_interest = apply_vault_interest(guild_id, data)
+    if vault_interest != 0:
+        changed = True
+
     store.set_member(guild_id, user_id, data)
 
-    if save:
+    if save and changed:
         await store.save()
 
     return data
@@ -387,37 +475,6 @@ class BaxView(discord.ui.View):
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass
 
-    async def _finalize_session(self, title: str) -> None:
-        key = self._key()
-
-        session = bax_sessions.get(key)
-        if session is None or not session.active:
-            return
-
-        session.active = False
-        bax_sessions.pop(key, None)
-
-        data = await ensure_registered(session.guild_id, session.user_id, save=False)
-        tax_rate = store.get_tax_rate(session.guild_id)
-        gross, tax, net = bax_settlement_for_stage(session.committed, session.stage, tax_rate)
-
-        data.balance += net
-        store.add_treasury(session.guild_id, tax)
-        store.set_member(session.guild_id, session.user_id, data)
-        await store.save()
-
-        await self._edit_message(
-            content=(
-                f"{title}\n"
-                f"현재 단계: **{session.stage}단계**\n"
-                f"배율: **{bax_multiplier(session.stage):.1f}배**\n"
-                f"총 지급액: **{gross:,}원**\n"
-                f"세금: **{tax:,}원**\n"
-                f"실수령액: **{net:,}원**\n"
-                f"현재 잔액: **{data.balance:,}원**"
-            )
-        )
-
     @discord.ui.button(label="강화", style=discord.ButtonStyle.primary)
     async def enhance(
         self,
@@ -433,7 +490,7 @@ class BaxView(discord.ui.View):
         async with self.session.lock:
             session = bax_sessions.get(key)
             if session is None or not session.active:
-                await interaction.response.send_message("진행 중인 박타기 세션이 없습니다.", ephemeral=True)
+                await interaction.response.send_message("세션이 만료되어 자동 종료되었습니다.", ephemeral=True)
                 return
 
             if interaction.user.id != session.user_id:
@@ -537,7 +594,7 @@ class BaxView(discord.ui.View):
         async with self.session.lock:
             session = bax_sessions.get(key)
             if session is None or not session.active:
-                await interaction.response.send_message("진행 중인 박타기 세션이 없습니다.", ephemeral=True)
+                await interaction.response.send_message("세션이 만료되어 자동 종료되었습니다.", ephemeral=True)
                 return
 
             if interaction.user.id != session.user_id:
@@ -585,7 +642,7 @@ class BaxView(discord.ui.View):
                         pass
                 return
 
-            # 만료 시 자동 정산: 사용자가 중간에 멈춘 것과 같은 방식으로 처리
+            # 10초 동안 동작이 없으면 자동 정산
             session.active = False
             bax_sessions.pop(key, None)
 
@@ -604,7 +661,7 @@ class BaxView(discord.ui.View):
                 try:
                     await self.message.edit(
                         content=(
-                            f"세션이 만료되어 자동 정산되었습니다.\n"
+                            f"세션이 10초 동안 동작이 없어 자동 종료되었습니다.\n"
                             f"현재 단계: **{session.stage}단계**\n"
                             f"배율: **{bax_multiplier(session.stage):.1f}배**\n"
                             f"총 지급액: **{gross:,}원**\n"
@@ -677,6 +734,7 @@ async def myinfo(
         f"**{target.display_name}**\n"
         f"신분: **{data.rank}**\n"
         f"잔액: **{data.balance:,}원**\n"
+        f"금고: **{data.vault_balance:,}원**\n"
         f"오늘 일하기 가능 여부: **{work_status}**\n"
     )
     await interaction.response.send_message(msg, ephemeral=True)
@@ -862,6 +920,21 @@ async def tax_set(
     await interaction.response.send_message(f"세율이 **{rate}%**로 설정되었습니다.", ephemeral=False)
 
 
+@bot.tree.command(name="금고이자설정", description="왕이 금고 이자율을 설정합니다.")
+@app_commands.describe(rate="0~100 사이의 일 이자율(%)")
+async def vault_interest_set(
+    interaction: discord.Interaction,
+    rate: app_commands.Range[int, 0, 100],
+) -> None:
+    guild, _, _ = await king_only(interaction)
+    store.set_vault_interest_rate(guild.id, float(rate))
+    await store.save()
+    await interaction.response.send_message(
+        f"금고 일 이자율이 **{float(rate):.1f}%**로 설정되었습니다.",
+        ephemeral=False,
+    )
+
+
 @bot.tree.command(name="국고보기", description="국고를 확인합니다.")
 async def treasury_view(interaction: discord.Interaction) -> None:
     guild, _, data = await require_guild_and_member(interaction)
@@ -871,8 +944,9 @@ async def treasury_view(interaction: discord.Interaction) -> None:
 
     treasury = store.get_treasury(guild.id)
     tax_rate = store.get_tax_rate(guild.id)
+    vault_rate = store.get_vault_interest_rate(guild.id)
     await interaction.response.send_message(
-        f"국고: **{treasury:,}원**\n세율: **{tax_rate}%**",
+        f"국고: **{treasury:,}원**\n세율: **{tax_rate}%**\n금고 이자율: **{vault_rate:.1f}%**",
         ephemeral=True,
     )
 
@@ -1020,6 +1094,91 @@ async def money_manage(
     )
 
 
+@bot.tree.command(name="금고", description="금고에 돈을 넣거나 꺼냅니다.")
+@app_commands.describe(
+    action="입금 또는 출금",
+    amount="금액",
+)
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="입금", value="deposit"),
+        app_commands.Choice(name="출금", value="withdraw"),
+    ]
+)
+async def vault(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str],
+    amount: app_commands.Range[int, 1, 10_000_000_000],
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message("서버에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("서버 멤버만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    member = interaction.user
+    guild = interaction.guild
+
+    data = await ensure_registered(guild.id, member.id, member)
+
+    money = int(amount)
+    vault_rate = store.get_vault_interest_rate(guild.id)
+
+    if action.value == "deposit":
+        if data.balance < money:
+            await interaction.response.send_message(
+                f"잔액이 부족합니다.\n"
+                f"현재 잔액: **{data.balance:,}원**\n"
+                f"필요 금액: **{money:,}원**",
+                ephemeral=True,
+            )
+            return
+
+        data.balance -= money
+        data.vault_balance += money
+
+        store.set_member(guild.id, member.id, data)
+        await store.save()
+
+        await interaction.response.send_message(
+            f"{member.mention}이(가) 금고에 **{money:,}원**을 입금했습니다.\n"
+            f"현재 잔액: **{data.balance:,}원**\n"
+            f"금고 잔액: **{data.vault_balance:,}원**\n"
+            f"금고 이자율: **{vault_rate:.1f}%**",
+            ephemeral=False,
+        )
+        return
+
+    if action.value == "withdraw":
+        if data.vault_balance < money:
+            await interaction.response.send_message(
+                f"금고 잔액이 부족합니다.\n"
+                f"현재 금고 잔액: **{data.vault_balance:,}원**\n"
+                f"필요 금액: **{money:,}원**",
+                ephemeral=True,
+            )
+            return
+
+        data.vault_balance -= money
+        data.balance += money
+
+        store.set_member(guild.id, member.id, data)
+        await store.save()
+
+        await interaction.response.send_message(
+            f"{member.mention}이(가) 금고에서 **{money:,}원**을 출금했습니다.\n"
+            f"현재 잔액: **{data.balance:,}원**\n"
+            f"금고 잔액: **{data.vault_balance:,}원**\n"
+            f"금고 이자율: **{vault_rate:.1f}%**",
+            ephemeral=False,
+        )
+        return
+
+    await interaction.response.send_message("잘못된 명령입니다.", ephemeral=True)
+
+
 @bot.tree.command(name="박타기", description="한 단계씩 강화하면서 중간에 멈출 수 있습니다.")
 @app_commands.describe(
     bet="처음 걸 금액",
@@ -1084,6 +1243,7 @@ async def bax_taogi(
         f"지금 그만두면: **{net:,}원**\n"
         f"다음 성공 확률: **{session.next_rate()}%**\n"
         f"세율: **{tax_rate}%**\n"
+        f"10초 동안 아무 동작이 없으면 자동으로 정산 후 종료됩니다.\n"
         f"아래 버튼으로 한 단계씩 진행하거나 중간에 멈출 수 있습니다.",
         view=view,
         ephemeral=False,
